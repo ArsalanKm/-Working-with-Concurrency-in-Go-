@@ -58,12 +58,16 @@ func main() {
 	}
 
 	color.Green("The shop is open for the Day !")
-	
+
 	// add barbers
+
+	shop.addBarber("Frank")
 
 	// start the barbershop
 
 	// start the barbershop go routine
 
 	// block until the barbershop is closed
+
+	time.Sleep(5 * time.Second)
 }
