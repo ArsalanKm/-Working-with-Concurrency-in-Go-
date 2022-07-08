@@ -15,7 +15,8 @@ const webPort = "80"
 
 func main() {
 	// connect to database
-
+	db := initDB()
+	db.Ping()
 	// create sessions
 
 	// create some channels
@@ -53,6 +54,8 @@ func connectToDB() *sql.DB {
 		}
 		log.Print("Backing off for 1 seconds")
 		time.Sleep(time.Second * 10)
+		counts++
+		continue
 	}
 
 }
