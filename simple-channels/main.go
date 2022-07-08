@@ -7,7 +7,11 @@ import (
 
 func shout(ping, pong chan string) {
 	for {
-		s := <-ping
+		s, ok := <-ping
+		if !ok {
+			// do some thing
+			// wether the value sent to channel is zero value or not
+		}
 		pong <- fmt.Sprintf("%s!!!", strings.ToUpper(s))
 	}
 }
@@ -16,7 +20,7 @@ func main() {
 	// create two channels
 	ping := make(chan string)
 	pong := make(chan string)
-	// 
+	//
 	go shout(ping, pong)
 
 	fmt.Println("Type something and press enter(enter q to quite)")
