@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"encoding/gob"
+	"final-project/data"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,36 +24,56 @@ import (
 const webPort = "80"
 
 func main() {
-	// connect to database
+	// connect to the database
 	db := initDB()
-	// db.Ping()
+
 	// create sessions
 	session := initSession()
+
 	// create loggers
 	infoLog := log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
-	errLog := log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime|log.Lshortfile)
-	// create some channels
+	errorLog := log.New(os.Stdout, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
+
+	// create channels
 
 	// create waitgroup
 	wg := sync.WaitGroup{}
 
 	// set up the application config
-
 	app := Config{
 		Session:  session,
 		DB:       db,
-		Wait:     &wg,
 		InfoLog:  infoLog,
-		ErrorLog: errLog,
+		ErrorLog: errorLog,
+		Wait:     &wg,
+		Models:   data.New(db),
+		ErrorChan: make(chan error),
+		ErrorChanDone: make(chan bool),
 	}
-	// sending email
+
+	// set up mail
+	app.Mailer = app.createMail()
+	go app.listenForMail()
 
 	// listen for signals
+	go app.listenForShutdown()
 
-	go app.listenForShutDown()
+	// listen for errors
+	go app.listenForErrors()
 
 	// listen for web connections
 	app.serve()
+}
+
+func (app *Config) listenForErrors() {
+	for {
+		select {
+		case err := <-app.ErrorChan:
+			app.ErrorLog.Println(err)
+		case <-app.ErrorChanDone:
+			return
+		}
+	}
 }
 
 func (app *Config) serve() {
@@ -60,13 +82,15 @@ func (app *Config) serve() {
 		Addr:    fmt.Sprintf(":%s", webPort),
 		Handler: app.routes(),
 	}
-	app.InfoLog.Println("Starting the Server..")
+
+	app.InfoLog.Println("Starting web server...")
 	err := srv.ListenAndServe()
 	if err != nil {
 		log.Panic(err)
 	}
 }
 
+// initDB connects to Postgres and returns a pool of connections
 func initDB() *sql.DB {
 	conn := connectToDB()
 	if conn == nil {
@@ -74,52 +98,68 @@ func initDB() *sql.DB {
 	}
 	return conn
 }
+
+// connectToDB tries to connect to postgres, and backs off until a connection
+// is made, or we have not connected after 10 tries
 func connectToDB() *sql.DB {
 	counts := 0
 
 	dsn := os.Getenv("DSN")
+
 	for {
 		connection, err := openDB(dsn)
 		if err != nil {
-			log.Println("postgress not yet ready...")
+			log.Println("postgres not yet ready...")
 		} else {
-			log.Println("connected to database!")
+			log.Print("connected to database!")
 			return connection
 		}
+
 		if counts > 10 {
 			return nil
 		}
-		log.Print("Backing off for 1 seconds")
-		time.Sleep(time.Second * 10)
+
+		log.Print("Backing off for 1 second")
+		time.Sleep(1 * time.Second)
 		counts++
+
 		continue
 	}
-
 }
 
+// openDB opens a connection to Postgres, using a DSN read
+// from the environment variable DSN
 func openDB(dsn string) (*sql.DB, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
 	}
+
 	err = db.Ping()
 	if err != nil {
 		return nil, err
 	}
+
 	return db, nil
 }
 
+// initSession sets up a session, using Redis for session store
 func initSession() *scs.SessionManager {
-	// set up sessions
+	gob.Register(data.User{})
+	
+	// set up session
 	session := scs.New()
 	session.Store = redisstore.New(initRedis())
 	session.Lifetime = 24 * time.Hour
 	session.Cookie.Persist = true
 	session.Cookie.SameSite = http.SameSiteLaxMode
 	session.Cookie.Secure = true
+
 	return session
 }
 
+// initRedis returns a pool of connections to Redis using the
+// environment variable REDIS
 func initRedis() *redis.Pool {
 	redisPool := &redis.Pool{
 		MaxIdle: 10,
@@ -131,18 +171,50 @@ func initRedis() *redis.Pool {
 	return redisPool
 }
 
-func (app *Config) listenForShutDown() {
+func (app *Config) listenForShutdown() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	app.shutDown()
+	app.shutdown()
 	os.Exit(0)
 }
 
-func (app *Config) shutDown() {
-	app.InfoLog.Println("would run cleanup tasks")
+func (app *Config) shutdown() {
+	// perform any cleanup tasks
+	app.InfoLog.Println("would run cleanup tasks...")
 
 	// block until waitgroup is empty
 	app.Wait.Wait()
-	app.InfoLog.Println("closing channels and shuting down application...")
+
+	app.Mailer.DoneChan <- true
+	app.ErrorChanDone <- true
+
+	app.InfoLog.Println("closing channels and shutting down application...")
+	close(app.Mailer.MailerChan)
+	close(app.Mailer.ErrorChan)
+	close(app.Mailer.DoneChan)
+	close(app.ErrorChan)
+	close(app.ErrorChanDone)
+}
+
+func (app *Config) createMail() Mail {
+	// create channels
+	errorChan := make(chan error)
+	mailerChan := make(chan Message, 100)
+	mailerDoneChan := make(chan bool)
+
+	m := Mail{
+		Domain: "localhost",
+		Host: "localhost",
+		Port: 1025,
+		Encryption: "none",
+		FromName: "Info",
+		FromAddress: "info@mycompany.com",
+		Wait: app.Wait,
+		ErrorChan: errorChan,
+		MailerChan: mailerChan,
+		DoneChan: mailerDoneChan,
+	}
+
+	return m
 }
